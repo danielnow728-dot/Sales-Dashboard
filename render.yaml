@@ -7,3 +7,9 @@ services:
     envVars:
       - key: APP_PASSWORD
         sync: false
+      - key: DB_DIR
+        value: /data
+    disk:
+      name: sales-db
+      mountPath: /data
+      sizeGB: 1

@@ -57,8 +57,9 @@ class UploadLog(Base):
 
 # Database initialization
 import os
-os.makedirs('data', exist_ok=True)
-engine = create_engine('sqlite:///data/sales_dashboard.db', connect_args={'check_same_thread': False})
+_db_dir = os.environ.get('DB_DIR', 'data')
+os.makedirs(_db_dir, exist_ok=True)
+engine = create_engine(f'sqlite:///{_db_dir}/sales_dashboard.db', connect_args={'check_same_thread': False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
