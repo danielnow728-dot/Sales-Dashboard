@@ -12,9 +12,8 @@ init_db()
 st.set_page_config(page_title="Sales Dashboard", layout="wide", page_icon="📈")
 
 # ── PASSWORD GATE ──────────────────────────────────────────────────────────────
-# Set APP_PASSWORD in .streamlit/secrets.toml before deploying.
-# Local fallback is "admin" — change it!
-_PASSWORD = st.secrets.get("APP_PASSWORD", "admin")
+import os
+_PASSWORD = os.environ.get("APP_PASSWORD", "admin")
 
 if not st.session_state.get("authenticated"):
     st.markdown("""
