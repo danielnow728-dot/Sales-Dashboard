@@ -1048,6 +1048,22 @@ else:
                         <div class="metric-value">${total_other_inc:,.0f}</div>
                     </div>""", unsafe_allow_html=True)
 
+                total_material = cust_df['material_income'].sum() if 'material_income' in cust_df.columns else 0
+                total_delivery = cust_df['delivery_income'].sum() if 'delivery_income' in cust_df.columns else 0
+                total_sub = cust_df['sub_income'].sum() if 'sub_income' in cust_df.columns else 0
+                total_misc = total_other_inc - total_material - total_delivery - total_sub
+
+                with st.expander("Other Income Breakdown"):
+                    oi1, oi2, oi3, oi4 = st.columns(4)
+                    with oi1:
+                        st.metric("Material / Equipment", f"${total_material:,.0f}")
+                    with oi2:
+                        st.metric("Delivery / Pick-Up", f"${total_delivery:,.0f}")
+                    with oi3:
+                        st.metric("Subcontractor", f"${total_sub:,.0f}")
+                    with oi4:
+                        st.metric("Misc / Other", f"${total_misc:,.0f}")
+
                 st.markdown("**Costs**")
                 c1, c2, c3 = st.columns(3)
                 with c1:

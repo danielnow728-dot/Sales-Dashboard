@@ -19,6 +19,9 @@ class SalesRecord(Base):
     invoiced = Column(Float, default=0.0)
     rental_income = Column(Float, default=0.0)
     labor_income = Column(Float, default=0.0)
+    material_income = Column(Float, default=0.0)
+    delivery_income = Column(Float, default=0.0)
+    sub_income = Column(Float, default=0.0)
     
     cost = Column(Float, default=0.0)
     labor_cost = Column(Float, default=0.0)

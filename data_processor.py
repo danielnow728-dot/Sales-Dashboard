@@ -214,7 +214,9 @@ def process_sales_upload(uploaded_files, year: int, month: int):
                     'date_completed': j_meta.get('date_completed', None),
                     'salesperson': salesperson_from_meta(job, j_meta),
                     'invoiced': 0.0, 'rental_income': 0.0,
-                    'labor_income': 0.0, 'cost': 0.0, 'labor_cost': 0.0, 'other_costs': 0.0
+                    'labor_income': 0.0, 'material_income': 0.0,
+                    'delivery_income': 0.0, 'sub_income': 0.0,
+                    'cost': 0.0, 'labor_cost': 0.0, 'other_costs': 0.0
                 }
             return jobs_data[job]
 
@@ -229,6 +231,9 @@ def process_sales_upload(uploaded_files, year: int, month: int):
                 jd['customer'] = str(row['Customer'])
                 if cat == 'Rent': jd['rental_income'] += amt
                 elif cat == 'Labor': jd['labor_income'] += amt
+                elif cat == 'Material': jd['material_income'] += amt
+                elif cat == 'Delivery': jd['delivery_income'] += amt
+                elif cat == 'Sub': jd['sub_income'] += amt
                 # Note: We NO LONGER add to jd['invoiced'] here, taking it from SalesPerson instead.
         
         # 2. Assign Salesperson & Aggregate True Revenue (Commissionable)
@@ -275,12 +280,15 @@ def process_sales_upload(uploaded_files, year: int, month: int):
                 customer=d['customer'], description=d['description'],
                 salesperson=d['salesperson'], date_completed=d['date_completed'],
                 invoiced=d['invoiced'], rental_income=d['rental_income'],
-                labor_income=d['labor_income'], cost=d['cost'],
+                labor_income=d['labor_income'],
+                material_income=d['material_income'], delivery_income=d['delivery_income'],
+                sub_income=d['sub_income'],
+                cost=d['cost'],
                 labor_cost=float(d['labor_cost']), other_costs=float(d['other_costs']),
                 gross_profit=float(d['invoiced']) - float(d['cost'])
             )
             insert_records.append(r)
-            
+
         session.add_all(insert_records)
         
         log = UploadLog(upload_timestamp=datetime.utcnow(), data_type="Sales")
@@ -427,8 +435,9 @@ def process_annual_upload(uploaded_files, year: int):
                         'salesperson':    salesperson_from_meta(job, meta),
                         'date_completed': meta.get('date_completed'),
                         'invoiced': 0.0, 'rental_income': 0.0,
-                        'labor_income': 0.0, 'cost': 0.0,
-                        'labor_cost': 0.0, 'other_costs': 0.0,
+                        'labor_income': 0.0, 'material_income': 0.0,
+                        'delivery_income': 0.0, 'sub_income': 0.0,
+                        'cost': 0.0, 'labor_cost': 0.0, 'other_costs': 0.0,
                     }
                 return jd[job]
 
@@ -440,6 +449,9 @@ def process_annual_upload(uploaded_files, year: int):
                 jd['customer'] = str(row['Customer'])
                 if cat == 'Rent':  jd['rental_income'] += amt
                 elif cat == 'Labor': jd['labor_income'] += amt
+                elif cat == 'Material': jd['material_income'] += amt
+                elif cat == 'Delivery': jd['delivery_income'] += amt
+                elif cat == 'Sub': jd['sub_income'] += amt
 
             for _, row in sp_m.iterrows():
                 inv = str(row[1]).strip()
@@ -474,7 +486,10 @@ def process_annual_upload(uploaded_files, year: int):
                     customer=d['customer'], description=d['description'],
                     salesperson=d['salesperson'], date_completed=d['date_completed'],
                     invoiced=d['invoiced'], rental_income=d['rental_income'],
-                    labor_income=d['labor_income'], cost=d['cost'],
+                    labor_income=d['labor_income'],
+                    material_income=d['material_income'], delivery_income=d['delivery_income'],
+                    sub_income=d['sub_income'],
+                    cost=d['cost'],
                     labor_cost=float(d['labor_cost']), other_costs=float(d['other_costs']),
                     gross_profit=float(d['invoiced']) - float(d['cost'])
                 )
