@@ -453,7 +453,7 @@ def sortable_table(df, currency_cols=None, pct_cols=None, height=420):
 if sales_df.empty:
     st.info("Welcome! Please upload the 5 `.xlsx` Sales files in the sidebar to get started.")
 else:
-    tab1, tab2 = st.tabs(["Sales Dashboard", "Performance & Backlog"])
+    tab1, tab2, tab3 = st.tabs(["Sales Dashboard", "Performance & Backlog", "Customer & Project"])
 
     month_names = {1:'Jan', 2:'Feb', 3:'Mar', 4:'Apr', 5:'May', 6:'Jun',
                    7:'Jul', 8:'Aug', 9:'Sep', 10:'Oct', 11:'Nov', 12:'Dec'}
@@ -914,3 +914,174 @@ else:
             sortable_table(bl_display,
                            currency_cols=['Revised Contract', 'Billed to Date', 'Hard Backlog'],
                            height=bl_height)
+
+    # =========================================================
+    # TAB 3 — CUSTOMER & PROJECT ANALYSIS
+    # =========================================================
+    with tab3:
+        st.markdown("### Customer & Project Analysis")
+
+        # ── Time frame filter ─────────────────────────────────────────────
+        all_years_t3 = sorted(sales_df['year'].unique())
+        max_year_t3 = 2026
+        last_data_month_t3 = int(sales_df[sales_df['year'] == max_year_t3]['month'].max()) if max_year_t3 in all_years_t3 else 12
+
+        tf_col3, _ = st.columns([3, 1])
+        with tf_col3:
+            time_frame_t3 = st.radio("Time Frame", ["YTD", "Last Year", "All", "Custom Range"],
+                                      horizontal=True, key="t3_tf")
+
+        if time_frame_t3 == "YTD":
+            t3_start_year, t3_start_month = max_year_t3, 1
+            t3_end_year, t3_end_month = max_year_t3, last_data_month_t3
+            t3_period_label = f"YTD {max_year_t3}"
+
+        elif time_frame_t3 == "Last Year":
+            t3_ly = max_year_t3 - 1
+            t3_start_year, t3_start_month = t3_ly, 1
+            t3_end_year, t3_end_month = t3_ly, 12
+            t3_period_label = str(t3_ly)
+
+        elif time_frame_t3 == "All":
+            t3_start_year = min(all_years_t3)
+            t3_start_month = 1
+            t3_end_year = max_year_t3
+            t3_end_month = last_data_month_t3
+            t3_period_label = f"{t3_start_year} – {t3_end_year}"
+
+        else:  # Custom Range
+            cr1_t3, cr2_t3 = st.columns(2)
+            with cr1_t3:
+                st.markdown("**Start**")
+                t3_start_year = st.selectbox("Year ", all_years_t3, index=0, key="t3_sy")
+                t3_avail_start = sorted(sales_df[sales_df['year'] == t3_start_year]['month'].unique())
+                t3_start_month = st.selectbox("Month ", t3_avail_start,
+                                               format_func=lambda m: month_names[m],
+                                               index=0, key="t3_sm")
+            with cr2_t3:
+                st.markdown("**End**")
+                t3_end_year = st.selectbox("Year  ", all_years_t3,
+                                            index=len(all_years_t3) - 1, key="t3_ey")
+                t3_avail_end = sorted(sales_df[sales_df['year'] == t3_end_year]['month'].unique())
+                t3_end_month = st.selectbox("Month  ", t3_avail_end,
+                                             format_func=lambda m: month_names[m],
+                                             index=len(t3_avail_end) - 1, key="t3_em")
+            t3_period_label = (f"{month_names[t3_start_month]} {t3_start_year} – "
+                               f"{month_names[t3_end_month]} {t3_end_year}")
+
+        # ── Filter by date range ──────────────────────────────────────────
+        t3_ym = sales_df['year'] * 100 + sales_df['month']
+        t3_start_ym = t3_start_year * 100 + t3_start_month
+        t3_end_ym = t3_end_year * 100 + t3_end_month
+        t3_filtered = sales_df[(t3_ym >= t3_start_ym) & (t3_ym <= t3_end_ym)]
+
+        # ── Customer selection (searchable) ───────────────────────────────
+        t3_customers = sorted(t3_filtered['customer'].dropna().unique().tolist())
+
+        selected_customer = st.selectbox(
+            "Select Customer",
+            options=[""] + t3_customers,
+            index=0,
+            key="t3_customer",
+            placeholder="Start typing a customer name..."
+        )
+
+        if not selected_customer:
+            st.info("Please select a customer to view their projects.")
+        else:
+            cust_df = t3_filtered[t3_filtered['customer'] == selected_customer]
+
+            # ── Project selection ─────────────────────────────────────────
+            cust_jobs = sorted(cust_df['job_number'].dropna().unique().tolist())
+            selected_jobs = st.multiselect(
+                "Select Projects",
+                options=cust_jobs,
+                default=cust_jobs,
+                key="t3_jobs",
+                placeholder="All projects (or pick specific ones)"
+            )
+
+            if selected_jobs:
+                cust_df = cust_df[cust_df['job_number'].isin(selected_jobs)]
+
+            if cust_df.empty:
+                st.warning("No data for the selected filters.")
+            else:
+                # ── Summary metrics ───────────────────────────────────────
+                total_invoiced = cust_df['invoiced'].sum()
+                total_cost = cust_df['cost'].sum()
+                total_gp = cust_df['gross_profit'].sum()
+                gp_pct = (total_gp / total_invoiced * 100) if total_invoiced else 0
+
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Invoiced</div>
+                        <div class="metric-value">${total_invoiced:,.0f}</div>
+                    </div>""", unsafe_allow_html=True)
+                with m2:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Total Cost</div>
+                        <div class="metric-value">${total_cost:,.0f}</div>
+                    </div>""", unsafe_allow_html=True)
+                with m3:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Gross Profit</div>
+                        <div class="metric-value">${total_gp:,.0f}</div>
+                    </div>""", unsafe_allow_html=True)
+                with m4:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">GP %</div>
+                        <div class="metric-value">{gp_pct:.1f}%</div>
+                    </div>""", unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # ── Jobs detail table (same as Tab 1 bottom table) ────────
+                t3_head, t3_dl = st.columns([6, 1])
+                with t3_head:
+                    st.markdown(f"#### Jobs for {selected_customer} — {t3_period_label}")
+
+                num_cols = ['invoiced', 'rental_income', 'labor_income',
+                            'cost', 'labor_cost', 'other_costs', 'gross_profit']
+                t3_jobs_num = cust_df.groupby('job_number')[num_cols].sum().reset_index()
+
+                def best_text_t3(grp):
+                    real = grp[grp['customer'] != grp['description']]
+                    src = real if not real.empty else grp
+                    return pd.Series({
+                        'customer': src['customer'].iloc[0],
+                        'description': src['description'].iloc[0],
+                        'salesperson': src['salesperson'].iloc[0],
+                    })
+                t3_jobs_meta = cust_df.groupby('job_number').apply(best_text_t3).reset_index()
+                t3_all_jobs = pd.merge(t3_jobs_num, t3_jobs_meta, on='job_number')
+                t3_all_jobs = t3_all_jobs.sort_values(by='invoiced', ascending=False)
+                t3_all_jobs['non_labor_rent'] = t3_all_jobs['invoiced'] - t3_all_jobs['labor_income'] - t3_all_jobs['rental_income']
+                t3_all_jobs['gp_pct'] = t3_all_jobs.apply(lambda r: r['gross_profit'] / r['invoiced'] * 100 if r['invoiced'] else 0, axis=1)
+                t3_all_jobs['labor_margin_pct'] = t3_all_jobs.apply(lambda r: (r['labor_income'] - r['labor_cost']) / r['labor_income'] * 100 if r['labor_income'] else 0, axis=1)
+                t3_all_jobs = t3_all_jobs[['job_number', 'description', 'salesperson',
+                                            'invoiced', 'rental_income', 'labor_income', 'non_labor_rent',
+                                            'cost', 'labor_cost', 'other_costs',
+                                            'gross_profit', 'gp_pct', 'labor_margin_pct']]
+                t3_all_jobs.columns = ['Job', 'Description', 'Salesperson',
+                                        'Invoiced', 'Rental Income', 'Labor Income', 'Other Income',
+                                        'Total Cost', 'Labor Cost', 'Other Costs',
+                                        'Gross Profit', 'GP %', 'Labor Margin %']
+
+                t3_safe_label = t3_period_label.replace(" ", "_").replace("–", "-")
+                with t3_dl:
+                    st.download_button("⬇", to_excel(t3_all_jobs,
+                                                      currency_cols=['Invoiced', 'Rental Income', 'Labor Income', 'Other Income',
+                                                                     'Total Cost', 'Labor Cost', 'Other Costs', 'Gross Profit'],
+                                                      pct_cols=['GP %', 'Labor Margin %']),
+                                       file_name=f"customer_jobs_{t3_safe_label}.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                       key="dl_cust_jobs")
+
+                t3_height = min(55 + len(t3_all_jobs) * 44, 1400)
+                sortable_table(t3_all_jobs,
+                               currency_cols=['Invoiced', 'Rental Income', 'Labor Income', 'Other Income',
+                                              'Total Cost', 'Labor Cost', 'Other Costs', 'Gross Profit'],
+                               pct_cols=['GP %', 'Labor Margin %'],
+                               height=t3_height)
