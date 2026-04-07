@@ -1015,30 +1015,73 @@ else:
             else:
                 # ── Summary metrics ───────────────────────────────────────
                 total_invoiced = cust_df['invoiced'].sum()
+                total_rental = cust_df['rental_income'].sum()
+                total_labor_inc = cust_df['labor_income'].sum()
+                total_other_inc = total_invoiced - total_labor_inc - total_rental
                 total_cost = cust_df['cost'].sum()
+                total_labor_cost = cust_df['labor_cost'].sum()
+                total_other_cost = cust_df['other_costs'].sum()
                 total_gp = cust_df['gross_profit'].sum()
                 gp_pct = (total_gp / total_invoiced * 100) if total_invoiced else 0
+                labor_margin = ((total_labor_inc - total_labor_cost) / total_labor_inc * 100) if total_labor_inc else 0
 
-                m1, m2, m3, m4 = st.columns(4)
-                with m1:
+                st.markdown("**Revenue**")
+                r1, r2, r3, r4 = st.columns(4)
+                with r1:
                     st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Invoiced</div>
+                        <div class="metric-label">Total Invoiced</div>
                         <div class="metric-value">${total_invoiced:,.0f}</div>
                     </div>""", unsafe_allow_html=True)
-                with m2:
+                with r2:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Labor Income</div>
+                        <div class="metric-value">${total_labor_inc:,.0f}</div>
+                    </div>""", unsafe_allow_html=True)
+                with r3:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Rental Income</div>
+                        <div class="metric-value">${total_rental:,.0f}</div>
+                    </div>""", unsafe_allow_html=True)
+                with r4:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Other Income</div>
+                        <div class="metric-value">${total_other_inc:,.0f}</div>
+                    </div>""", unsafe_allow_html=True)
+
+                st.markdown("**Costs**")
+                c1, c2, c3 = st.columns(3)
+                with c1:
                     st.markdown(f"""<div class="metric-card">
                         <div class="metric-label">Total Cost</div>
                         <div class="metric-value">${total_cost:,.0f}</div>
                     </div>""", unsafe_allow_html=True)
-                with m3:
+                with c2:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Labor Cost</div>
+                        <div class="metric-value">${total_labor_cost:,.0f}</div>
+                    </div>""", unsafe_allow_html=True)
+                with c3:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Other Costs</div>
+                        <div class="metric-value">${total_other_cost:,.0f}</div>
+                    </div>""", unsafe_allow_html=True)
+
+                st.markdown("**Profitability**")
+                p1, p2, p3 = st.columns(3)
+                with p1:
                     st.markdown(f"""<div class="metric-card">
                         <div class="metric-label">Gross Profit</div>
                         <div class="metric-value">${total_gp:,.0f}</div>
                     </div>""", unsafe_allow_html=True)
-                with m4:
+                with p2:
                     st.markdown(f"""<div class="metric-card">
                         <div class="metric-label">GP %</div>
                         <div class="metric-value">{gp_pct:.1f}%</div>
+                    </div>""", unsafe_allow_html=True)
+                with p3:
+                    st.markdown(f"""<div class="metric-card">
+                        <div class="metric-label">Labor Margin %</div>
+                        <div class="metric-value">{labor_margin:.1f}%</div>
                     </div>""", unsafe_allow_html=True)
 
                 st.markdown("<br>", unsafe_allow_html=True)
