@@ -472,9 +472,9 @@ else:
 
         # ── Available date range in the data ──────────────────────────────────
         all_years_t1 = sorted(sales_df['year'].unique())
-        max_year_t1  = max(all_years_t1)
+        max_year_t1  = 2026
         min_year_t1  = min(all_years_t1)
-        last_data_month_t1 = int(sales_df[sales_df['year'] == max_year_t1]['month'].max())
+        last_data_month_t1 = int(sales_df[sales_df['year'] == max_year_t1]['month'].max()) if max_year_t1 in all_years_t1 else 12
 
         tf_col, sp_col = st.columns([3, 1])
         with tf_col:
@@ -706,9 +706,9 @@ else:
             pb_sp = st.multiselect("Select Salesperson", salespeople_t2,
                                    placeholder="All Salespeople", key="t2_sp")
 
-        # Determine current and prior year from available data
-        current_year = max(all_years)
-        prior_year = current_year - 1
+        # Current year is always 2026; prior year is 2025
+        current_year = 2026
+        prior_year = 2025
 
         # Filter sales data by salesperson
         def sp_filter(df, sp_list):
