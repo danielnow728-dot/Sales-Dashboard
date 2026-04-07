@@ -991,18 +991,24 @@ else:
         else:
             cust_df = t3_filtered[t3_filtered['customer'] == selected_customer]
 
-            # ── Project selection ─────────────────────────────────────────
-            cust_jobs = sorted(cust_df['job_number'].dropna().unique().tolist())
-            selected_jobs = st.multiselect(
+            # ── Project selection (searchable by job number or description) ─
+            job_desc_map = {}
+            for jn in cust_df['job_number'].dropna().unique():
+                desc = cust_df[cust_df['job_number'] == jn]['description'].iloc[0]
+                job_desc_map[jn] = f"{jn} — {desc}" if pd.notna(desc) and desc else jn
+            job_options = sorted(job_desc_map.keys(), key=lambda j: job_desc_map[j])
+
+            selected_job_labels = st.multiselect(
                 "Select Projects",
-                options=cust_jobs,
-                default=cust_jobs,
+                options=job_options,
+                default=job_options,
+                format_func=lambda j: job_desc_map[j],
                 key="t3_jobs",
-                placeholder="All projects (or pick specific ones)"
+                placeholder="Type a job number or description..."
             )
 
-            if selected_jobs:
-                cust_df = cust_df[cust_df['job_number'].isin(selected_jobs)]
+            if selected_job_labels:
+                cust_df = cust_df[cust_df['job_number'].isin(selected_job_labels)]
 
             if cust_df.empty:
                 st.warning("No data for the selected filters.")
