@@ -67,3 +67,16 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    # Lightweight migration: add new columns to existing 'sales' table if missing
+    from sqlalchemy import text
+    new_cols = {
+        'material_income': 'FLOAT DEFAULT 0.0',
+        'delivery_income': 'FLOAT DEFAULT 0.0',
+        'sub_income': 'FLOAT DEFAULT 0.0',
+    }
+    with engine.connect() as conn:
+        existing = {row[1] for row in conn.execute(text("PRAGMA table_info(sales)"))}
+        for col, col_type in new_cols.items():
+            if col not in existing:
+                conn.execute(text(f"ALTER TABLE sales ADD COLUMN {col} {col_type}"))
+        conn.commit()
