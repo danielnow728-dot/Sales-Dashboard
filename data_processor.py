@@ -208,7 +208,7 @@ def process_sales_upload(uploaded_files, year: int, month: int):
             if job not in jobs_data:
                 j_meta = job_meta_dict.get(job, {})
                 jobs_data[job] = {
-                    'customer': j_meta.get('description', 'Unknown'),
+                    'customer': 'Unknown',
                     'description': j_meta.get('description', 'Unknown'),
                     'project_manager': j_meta.get('project_manager', ''),
                     'date_completed': j_meta.get('date_completed', None),
@@ -430,7 +430,7 @@ def process_annual_upload(uploaded_files, year: int):
                 if job not in jd:
                     meta = job_meta_dict.get(job, {})
                     jd[job] = {
-                        'customer':       meta.get('description', 'Unknown'),
+                        'customer':       'Unknown',
                         'description':    meta.get('description', 'Unknown'),
                         'salesperson':    salesperson_from_meta(job, meta),
                         'date_completed': meta.get('date_completed'),

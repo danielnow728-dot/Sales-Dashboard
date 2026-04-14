@@ -975,23 +975,28 @@ else:
         t3_end_ym = t3_end_year * 100 + t3_end_month
         t3_filtered = sales_df[(t3_ym >= t3_start_ym) & (t3_ym <= t3_end_ym)]
 
-        # ── Customer selection (searchable) ───────────────────────────────
-        t3_customers = sorted(t3_filtered['customer'].dropna().unique().tolist())
+        # ── Customer + Project selection (two dropdowns side by side) ────
+        t3_customers = sorted([
+            c for c in t3_filtered['customer'].dropna().unique().tolist()
+            if c and c != 'Unknown'
+        ])
 
-        selected_customer = st.selectbox(
-            "Select Customer",
-            options=[""] + t3_customers,
-            index=0,
-            key="t3_customer",
-            placeholder="Start typing a customer name..."
-        )
+        sel_col1, sel_col2 = st.columns(2)
+        with sel_col1:
+            selected_customer = st.selectbox(
+                "Select Customer",
+                options=[""] + t3_customers,
+                index=0,
+                key="t3_customer",
+                placeholder="Start typing a customer name..."
+            )
 
-        if not selected_customer:
-            st.info("Please select a customer to view their projects.")
-        else:
+        if selected_customer:
             cust_df = t3_filtered[t3_filtered['customer'] == selected_customer]
+        else:
+            cust_df = t3_filtered.iloc[0:0]  # empty until customer picked
 
-            # ── Project selection (searchable by job number or description) ─
+        with sel_col2:
             job_desc_map = {}
             for jn in cust_df['job_number'].dropna().unique():
                 desc = cust_df[cust_df['job_number'] == jn]['description'].iloc[0]
@@ -1002,11 +1007,15 @@ else:
                 "Select Projects",
                 options=job_options,
                 default=job_options,
-                format_func=lambda j: job_desc_map[j],
+                format_func=lambda j: job_desc_map.get(j, j),
                 key="t3_jobs",
-                placeholder="Type a job number or description..."
+                placeholder="Type a job number or description...",
+                disabled=not selected_customer,
             )
 
+        if not selected_customer:
+            st.info("Please select a customer to view their projects.")
+        else:
             if selected_job_labels:
                 cust_df = cust_df[cust_df['job_number'].isin(selected_job_labels)]
 
