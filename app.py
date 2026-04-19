@@ -3,7 +3,11 @@ import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 from database import init_db, SessionLocal, SalesRecord, UploadLog, BacklogSnapshot, BudgetRecord
-from data_processor import process_sales_upload, process_annual_upload, process_budget_upload
+from data_processor import (
+    process_sales_upload, process_annual_upload, process_budget_upload,
+    get_file_library, process_labor_distribution, process_job_cost_status,
+)
+from database import JobHours, JobChangeOrder, JobBudget
 from sqlalchemy import func
 
 # Initialize DB on first load
@@ -122,6 +126,27 @@ st.markdown("""
         font-weight: 600 !important;
     }
 
+    /* ── Streamlit st.metric — bigger label + value ── */
+    [data-testid="stMetricLabel"] p,
+    [data-testid="stMetricLabel"] {
+        font-size: 1.35rem !important;
+        font-weight: 600 !important;
+        color: #34495e !important;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 2.4rem !important;
+        font-weight: 700 !important;
+        color: #2c3e50 !important;
+    }
+
+    /* ── Bordered containers get a softer tint so sections stand out ── */
+    [data-testid="stExpander"] [data-testid="stVerticalBlockBorderWrapper"] {
+        background-color: #fafcfe;
+        border-radius: 10px !important;
+        padding: 12px 16px !important;
+    }
+
+
     /* ── Dataframe / ag-grid table font size ── */
     .stDataFrame .ag-cell,
     .stDataFrame .ag-header-cell-text,
@@ -144,8 +169,15 @@ import os
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3050/3050525.png", width=60)
     st.title("Data Management")
+
+    def _clear_uploaders(keys):
+        """Clear file uploader state so the user can immediately upload another set."""
+        for k in keys:
+            if k in st.session_state:
+                del st.session_state[k]
+
     st.markdown("Upload the 5 monthly `.xlsx` exports below. The system automatically categorizes and joins them.")
-    
+
     st.subheader("1. Monthly Data Upload")
     upload_year = st.selectbox("Assign to Year", [2024, 2025, 2026, 2027], index=2)
     upload_month = st.selectbox("Assign to Month", range(1, 13), format_func=lambda x: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][x-1])
@@ -185,14 +217,43 @@ with st.sidebar:
         st.caption(f"{len(all_files)}/5 files uploaded")
 
     if ready:
-        if st.button("Process Monthly Data", type="primary", use_container_width=True):
-            with st.spinner("Joining files & updating records..."):
-                success, msg = process_sales_upload(all_files, upload_year, upload_month)
-                if success:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+        # Check if this period was loaded via a bulk/annual upload
+        _monthly_session = SessionLocal()
+        _has_annual = (_monthly_session.query(UploadLog)
+                       .filter(UploadLog.data_type == f"Annual-{upload_year}")
+                       .first() is not None)
+        _has_existing = (_monthly_session.query(SalesRecord)
+                         .filter(SalesRecord.year == upload_year,
+                                 SalesRecord.month == upload_month)
+                         .first() is not None)
+        _monthly_session.close()
+
+        _month_name = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][upload_month - 1]
+
+        if _has_annual and _has_existing:
+            st.warning(f"⚠ {_month_name} {upload_year} already has data from a **bulk/annual upload**. "
+                       f"Uploading monthly data will **overwrite** that period. "
+                       f"Are you sure this isn't a mistake (e.g., wrong year)?")
+            _confirm = st.checkbox(f"Yes, I want to overwrite {_month_name} {upload_year}",
+                                    key="confirm_overwrite_monthly")
+            if _confirm:
+                if st.button("Process Monthly Data", type="primary", use_container_width=True):
+                    with st.spinner("Joining files & updating records..."):
+                        success, msg = process_sales_upload(all_files, upload_year, upload_month)
+                        if success:
+                            _clear_uploaders([k for k, _, _ in FILE_SLOTS])
+                            st.success(msg); st.rerun()
+                        else:
+                            st.error(msg)
+        else:
+            if st.button("Process Monthly Data", type="primary", use_container_width=True):
+                with st.spinner("Joining files & updating records..."):
+                    success, msg = process_sales_upload(all_files, upload_year, upload_month)
+                    if success:
+                        _clear_uploaders([k for k, _, _ in FILE_SLOTS])
+                        st.success(msg); st.rerun()
+                    else:
+                        st.error(msg)
                     
     st.markdown("---")
     st.subheader("2. Annual / Bulk Upload")
@@ -236,8 +297,8 @@ with st.sidebar:
             with st.spinner(f"Splitting {annual_year} data by month and loading…"):
                 success, msg = process_annual_upload(annual_files, annual_year)
                 if success:
-                    st.success(msg)
-                    st.rerun()
+                    _clear_uploaders([k for k, _, _ in ANNUAL_SLOTS])
+                    st.success(msg); st.rerun()
                 else:
                     st.error(msg)
 
@@ -261,13 +322,58 @@ with st.sidebar:
             with st.spinner(f"Loading {budget_year} budget…"):
                 success, msg = process_budget_upload(budget_file, budget_year)
                 if success:
-                    st.success(msg)
-                    st.rerun()
+                    _clear_uploaders(["budget_file_key"])
+                    st.success(msg); st.rerun()
                 else:
                     st.error(msg)
 
     st.markdown("---")
-    st.subheader("4. Loaded Periods")
+    st.subheader("4. Job Detail Files")
+    st.caption("Upload Labor Distribution and/or Job Cost Status. "
+               "Data accumulates over time — only jobs in the file are updated.")
+
+    _ld_done = st.session_state.get("labor_dist_key") is not None
+    st.markdown(f"""
+    <div class="file-slot {'file-slot-done' if _ld_done else 'file-slot-pending'}">
+        <div class="file-slot-label {'file-slot-label-done' if _ld_done else 'file-slot-label-pending'}">Labor Distribution</div>
+        <div class="file-status {'file-status-done' if _ld_done else 'file-status-pending'}">{'✔ Ready' if _ld_done else 'Awaiting upload…'}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    labor_dist_file = st.file_uploader("Labor Distribution.xlsx", type=["xlsx", "xls"],
+                                        key="labor_dist_key", label_visibility="collapsed")
+    if labor_dist_file is not None:
+        if st.button("Process Labor Distribution", type="primary",
+                     use_container_width=True, key="btn_labor_dist"):
+            with st.spinner("Processing Labor Distribution..."):
+                success, msg = process_labor_distribution(labor_dist_file)
+                if success:
+                    _clear_uploaders(["labor_dist_key"])
+                    st.success(msg); st.rerun()
+                else:
+                    st.error(msg)
+
+    _jcs_done = st.session_state.get("job_cost_status_key") is not None
+    st.markdown(f"""
+    <div class="file-slot {'file-slot-done' if _jcs_done else 'file-slot-pending'}">
+        <div class="file-slot-label {'file-slot-label-done' if _jcs_done else 'file-slot-label-pending'}">Job Cost Status</div>
+        <div class="file-status {'file-status-done' if _jcs_done else 'file-status-pending'}">{'✔ Ready' if _jcs_done else 'Awaiting upload…'}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    job_cost_file = st.file_uploader("Job Cost Status.xls", type=["xlsx", "xls"],
+                                      key="job_cost_status_key", label_visibility="collapsed")
+    if job_cost_file is not None:
+        if st.button("Process Job Cost Status", type="primary",
+                     use_container_width=True, key="btn_job_cost"):
+            with st.spinner("Processing Job Cost Status..."):
+                success, msg = process_job_cost_status(job_cost_file)
+                if success:
+                    _clear_uploaders(["job_cost_status_key"])
+                    st.success(msg); st.rerun()
+                else:
+                    st.error(msg)
+
+    st.markdown("---")
+    st.subheader("5. Loaded Periods")
 
     session = SessionLocal()
     loaded = (
@@ -300,6 +406,57 @@ with st.sidebar:
 
     if last_upload:
         st.caption(f"Last upload: {last_upload.upload_timestamp.strftime('%Y-%m-%d %H:%M')} UTC")
+
+    st.markdown("---")
+    st.subheader("6. File Library")
+    st.caption("All files ever uploaded, organized by type and period. Click to download a copy.")
+
+    _lib = get_file_library()
+    if _lib:
+        _lib_types = sorted(set(f['type'] for f in _lib))
+        for _lt in _lib_types:
+            with st.expander(f"📁 {_lt} files ({sum(1 for f in _lib if f['type'] == _lt)})"):
+                _type_files = [f for f in _lib if f['type'] == _lt]
+                _periods = sorted(set(f['period'] for f in _type_files), reverse=True)
+                for _per in _periods:
+                    st.markdown(f"**{_per}**")
+                    for _f in [f for f in _type_files if f['period'] == _per]:
+                        _fc1, _fc2 = st.columns([4, 1])
+                        with _fc1:
+                            st.caption(
+                                f"{_f['filename']}  ·  {_f['size_kb']} KB  ·  "
+                                f"uploaded {_f['uploaded_at'].strftime('%Y-%m-%d %H:%M')}"
+                            )
+                        with _fc2:
+                            with open(_f['path'], 'rb') as _fh:
+                                st.download_button(
+                                    "⬇",
+                                    data=_fh.read(),
+                                    file_name=_f['filename'],
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key=f"lib_{_f['type']}_{_f['period']}_{_f['filename']}",
+                                )
+    else:
+        st.caption("No files archived yet. Files are saved automatically on each upload.")
+
+    st.markdown("---")
+    st.subheader("7. Reset Database")
+    st.caption("Wipe all data and start fresh. This cannot be undone.")
+    _reset_confirm = st.checkbox("I understand this will delete ALL uploaded data", key="reset_confirm")
+    if _reset_confirm:
+        if st.button("🗑 Reset All Data", type="primary", use_container_width=True, key="btn_reset_db"):
+            _rs = SessionLocal()
+            from database import CustomerLookup
+            for tbl in [SalesRecord, BacklogSnapshot, BudgetRecord, JobHours, JobBudget, JobChangeOrder, CustomerLookup, UploadLog]:
+                _rs.query(tbl).delete()
+            _rs.commit()
+            _rs.close()
+            import shutil
+            _upload_dir = os.path.join(os.environ.get('DB_DIR', 'data'), 'uploads')
+            if os.path.isdir(_upload_dir):
+                shutil.rmtree(_upload_dir)
+            st.success("All data wiped. Ready for fresh uploads.")
+            st.rerun()
 
 # --- MAIN DASHBOARD ---
 logo_path = "logo.png" if os.path.exists("logo.png") else ("logo.jpg" if os.path.exists("logo.jpg") else None)
@@ -1034,80 +1191,104 @@ else:
                 gp_pct = (total_gp / total_invoiced * 100) if total_invoiced else 0
                 labor_margin = ((total_labor_inc - total_labor_cost) / total_labor_inc * 100) if total_labor_inc else 0
 
-                st.markdown("**Revenue**")
-                r1, r2, r3, r4 = st.columns(4)
-                with r1:
-                    st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Total Invoiced</div>
-                        <div class="metric-value">${total_invoiced:,.0f}</div>
-                    </div>""", unsafe_allow_html=True)
-                with r2:
-                    st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Labor Income</div>
-                        <div class="metric-value">${total_labor_inc:,.0f}</div>
-                    </div>""", unsafe_allow_html=True)
-                with r3:
-                    st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Rental Income</div>
-                        <div class="metric-value">${total_rental:,.0f}</div>
-                    </div>""", unsafe_allow_html=True)
-                with r4:
-                    st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Other Income</div>
-                        <div class="metric-value">${total_other_inc:,.0f}</div>
-                    </div>""", unsafe_allow_html=True)
+                # ── Contract Amount (static, from latest Job Summary snapshot) ──
+                # Legacy closed jobs in the source file have Revised Contract = 0 but keep
+                # historical Billed To Date. For those we use Billed as the effective contract.
+                if not backlog_df.empty:
+                    _ly = backlog_df['snapshot_year'].max()
+                    _lm = backlog_df[backlog_df['snapshot_year'] == _ly]['snapshot_month'].max()
+                    _latest_snap_top = backlog_df[
+                        (backlog_df['snapshot_year'] == _ly) &
+                        (backlog_df['snapshot_month'] == _lm)
+                    ][['job_number', 'revised_contract', 'billed_to_date', 'is_open']].copy()
+                    _zc = (~_latest_snap_top['is_open']) & (_latest_snap_top['revised_contract'] == 0)
+                    _latest_snap_top.loc[_zc, 'revised_contract'] = _latest_snap_top.loc[_zc, 'billed_to_date']
+                    _latest_snap_top = _latest_snap_top[['job_number', 'revised_contract', 'billed_to_date']]
+                else:
+                    _latest_snap_top = pd.DataFrame(columns=['job_number', 'revised_contract', 'billed_to_date'])
+                _selected_jobs = cust_df['job_number'].unique()
+                _sel_snap = _latest_snap_top[_latest_snap_top['job_number'].isin(_selected_jobs)]
+                total_contract = _sel_snap['revised_contract'].sum()
+                total_billed_ltd = _sel_snap['billed_to_date'].sum()
+                overall_pct_billed = (total_billed_ltd / total_contract * 100) if total_contract else 0
 
                 total_material = cust_df['material_income'].sum() if 'material_income' in cust_df.columns else 0
                 total_delivery = cust_df['delivery_income'].sum() if 'delivery_income' in cust_df.columns else 0
                 total_sub = cust_df['sub_income'].sum() if 'sub_income' in cust_df.columns else 0
                 total_misc = total_other_inc - total_material - total_delivery - total_sub
 
-                with st.expander("Other Income Breakdown"):
-                    oi1, oi2, oi3, oi4 = st.columns(4)
-                    with oi1:
-                        st.metric("Material / Equipment", f"${total_material:,.0f}")
-                    with oi2:
-                        st.metric("Delivery / Pick-Up", f"${total_delivery:,.0f}")
-                    with oi3:
-                        st.metric("Subcontractor", f"${total_sub:,.0f}")
-                    with oi4:
-                        st.metric("Misc / Other", f"${total_misc:,.0f}")
-
-                st.markdown("**Costs**")
-                c1, c2, c3 = st.columns(3)
-                with c1:
+                # ── Headline banner — 4 KPIs that matter most ───────────────────
+                st.caption(f"Period: **{t3_period_label}**  ·  Contract values are static (from latest Job Summary).")
+                h1, h2, h3, h4 = st.columns(4)
+                with h1:
                     st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Total Cost</div>
-                        <div class="metric-value">${total_cost:,.0f}</div>
+                        <div class="metric-label">Contract Amount</div>
+                        <div class="metric-value">${total_contract:,.0f}</div>
+                        <div style="font-size:1.15rem;color:#4a5968;font-weight:600;margin-top:8px;">static · lifetime</div>
                     </div>""", unsafe_allow_html=True)
-                with c2:
+                with h2:
                     st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Labor Cost</div>
-                        <div class="metric-value">${total_labor_cost:,.0f}</div>
+                        <div class="metric-label">% Billed</div>
+                        <div class="metric-value">{overall_pct_billed:.1f}%</div>
+                        <div style="font-size:1.15rem;color:#4a5968;font-weight:600;margin-top:8px;">lifetime billed to date</div>
                     </div>""", unsafe_allow_html=True)
-                with c3:
+                with h3:
                     st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Other Costs</div>
-                        <div class="metric-value">${total_other_cost:,.0f}</div>
+                        <div class="metric-label">Invoiced</div>
+                        <div class="metric-value">${total_invoiced:,.0f}</div>
+                        <div style="font-size:1.15rem;color:#4a5968;font-weight:600;margin-top:8px;">in selected period</div>
                     </div>""", unsafe_allow_html=True)
-
-                st.markdown("**Profitability**")
-                p1, p2, p3 = st.columns(3)
-                with p1:
+                with h4:
                     st.markdown(f"""<div class="metric-card">
                         <div class="metric-label">Gross Profit</div>
                         <div class="metric-value">${total_gp:,.0f}</div>
+                        <div style="font-size:1.15rem;color:#4a5968;font-weight:600;margin-top:8px;">{gp_pct:.1f}% GP · in selected period</div>
                     </div>""", unsafe_allow_html=True)
-                with p2:
-                    st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">GP %</div>
-                        <div class="metric-value">{gp_pct:.1f}%</div>
-                    </div>""", unsafe_allow_html=True)
-                with p3:
-                    st.markdown(f"""<div class="metric-card">
-                        <div class="metric-label">Labor Margin %</div>
-                        <div class="metric-value">{labor_margin:.1f}%</div>
-                    </div>""", unsafe_allow_html=True)
+
+                # ── Detail breakdown (collapsed by default) ─────────────────────
+                with st.expander("Revenue & Cost breakdown (selected period)"):
+                    _section_hdr = ("font-size:1.35rem;font-weight:700;color:#004987;"
+                                    "border-bottom:2px solid #004987;padding-bottom:4px;"
+                                    "margin:0 0 14px 0;letter-spacing:0.5px;")
+                    _sub_hdr = ("font-size:1.05rem;font-weight:600;color:#1f77b4;"
+                                "margin:14px 0 8px 0;text-transform:uppercase;letter-spacing:0.5px;")
+
+                    def _big_metric(label, value, divider=True):
+                        bd = "border-right:1px solid #dfe6ee;" if divider else ""
+                        return (f"<div style='{bd}padding:10px 14px;text-align:center;'>"
+                                f"<div style='font-size:1.35rem;font-weight:600;color:#34495e;letter-spacing:0.3px;'>{label}</div>"
+                                f"<div style='font-size:2.8rem;font-weight:700;color:#2c3e50;margin-top:6px;'>{value}</div>"
+                                f"</div>")
+
+                    def _small_metric(label, value):
+                        return (f"<div style='padding:4px 10px;text-align:center;'>"
+                                f"<div style='font-size:0.95rem;font-weight:600;color:#5a6b7d;'>{label}</div>"
+                                f"<div style='font-size:1.35rem;font-weight:700;color:#2c3e50;margin-top:2px;'>{value}</div>"
+                                f"</div>")
+
+                    with st.container(border=True):
+                        st.markdown(f'<div style="{_section_hdr}">REVENUE</div>', unsafe_allow_html=True)
+                        rb1, rb2, rb3 = st.columns(3)
+                        with rb1: st.markdown(_big_metric("Labor Income",  f"${total_labor_inc:,.0f}"),              unsafe_allow_html=True)
+                        with rb2: st.markdown(_big_metric("Rental Income", f"${total_rental:,.0f}"),                 unsafe_allow_html=True)
+                        with rb3: st.markdown(_big_metric("Other Income",  f"${total_other_inc:,.0f}", divider=False), unsafe_allow_html=True)
+
+                        st.markdown(f'<div style="{_sub_hdr}">Other Income composition</div>', unsafe_allow_html=True)
+                        ob1, ob2, ob3, ob4 = st.columns(4)
+                        with ob1: st.markdown(_small_metric("Material / Equipment", f"${total_material:,.0f}"), unsafe_allow_html=True)
+                        with ob2: st.markdown(_small_metric("Delivery / Pick-Up",   f"${total_delivery:,.0f}"), unsafe_allow_html=True)
+                        with ob3: st.markdown(_small_metric("Subcontractor",        f"${total_sub:,.0f}"),      unsafe_allow_html=True)
+                        with ob4: st.markdown(_small_metric("Misc / Other",         f"${total_misc:,.0f}"),      unsafe_allow_html=True)
+
+                    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+                    with st.container(border=True):
+                        st.markdown(f'<div style="{_section_hdr}">COSTS &amp; MARGIN</div>', unsafe_allow_html=True)
+                        cb1, cb2, cb3, cb4 = st.columns(4)
+                        with cb1: st.markdown(_big_metric("Total Cost",     f"${total_cost:,.0f}"),                         unsafe_allow_html=True)
+                        with cb2: st.markdown(_big_metric("Labor Cost",     f"${total_labor_cost:,.0f}"),                   unsafe_allow_html=True)
+                        with cb3: st.markdown(_big_metric("Other Costs",    f"${total_other_cost:,.0f}"),                   unsafe_allow_html=True)
+                        with cb4: st.markdown(_big_metric("Labor Margin %", f"{labor_margin:.1f}%", divider=False),         unsafe_allow_html=True)
 
                 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1134,28 +1315,150 @@ else:
                 t3_all_jobs['non_labor_rent'] = t3_all_jobs['invoiced'] - t3_all_jobs['labor_income'] - t3_all_jobs['rental_income']
                 t3_all_jobs['gp_pct'] = t3_all_jobs.apply(lambda r: r['gross_profit'] / r['invoiced'] * 100 if r['invoiced'] else 0, axis=1)
                 t3_all_jobs['labor_margin_pct'] = t3_all_jobs.apply(lambda r: (r['labor_income'] - r['labor_cost']) / r['labor_income'] * 100 if r['labor_income'] else 0, axis=1)
+
+                # ── Contract Amount & % Billed (static) from the LATEST uploaded Job Summary only ──
+                # Independent of Tab 3's time-frame filter — always reflects the most recent snapshot.
+                # Same legacy-closed-job fallback as the headline cards.
+                if not backlog_df.empty:
+                    latest_y = backlog_df['snapshot_year'].max()
+                    latest_m = backlog_df[backlog_df['snapshot_year'] == latest_y]['snapshot_month'].max()
+                    latest_snap = backlog_df[
+                        (backlog_df['snapshot_year'] == latest_y) &
+                        (backlog_df['snapshot_month'] == latest_m)
+                    ][['job_number', 'revised_contract', 'billed_to_date', 'is_open']].copy()
+                    _zc2 = (~latest_snap['is_open']) & (latest_snap['revised_contract'] == 0)
+                    latest_snap.loc[_zc2, 'revised_contract'] = latest_snap.loc[_zc2, 'billed_to_date']
+                    latest_snap = latest_snap[['job_number', 'revised_contract', 'billed_to_date']]
+                else:
+                    latest_snap = pd.DataFrame(columns=['job_number', 'revised_contract', 'billed_to_date'])
+
+                t3_all_jobs = pd.merge(t3_all_jobs, latest_snap, on='job_number', how='left')
+                t3_all_jobs['revised_contract'] = t3_all_jobs['revised_contract'].fillna(0)
+                t3_all_jobs['billed_to_date']   = t3_all_jobs['billed_to_date'].fillna(0)
+                t3_all_jobs['pct_billed'] = t3_all_jobs.apply(
+                    lambda r: r['billed_to_date'] / r['revised_contract'] * 100 if r['revised_contract'] else 0,
+                    axis=1
+                )
+
                 t3_all_jobs = t3_all_jobs[['job_number', 'description', 'salesperson',
-                                            'invoiced', 'rental_income', 'labor_income', 'non_labor_rent',
+                                            'revised_contract', 'invoiced', 'pct_billed',
+                                            'rental_income', 'labor_income', 'non_labor_rent',
                                             'cost', 'labor_cost', 'other_costs',
                                             'gross_profit', 'gp_pct', 'labor_margin_pct']]
                 t3_all_jobs.columns = ['Job', 'Description', 'Salesperson',
-                                        'Invoiced', 'Rental Income', 'Labor Income', 'Other Income',
+                                        'Contract Amount', 'Invoiced', '% Billed',
+                                        'Rental Income', 'Labor Income', 'Other Income',
                                         'Total Cost', 'Labor Cost', 'Other Costs',
                                         'Gross Profit', 'GP %', 'Labor Margin %']
 
                 t3_safe_label = t3_period_label.replace(" ", "_").replace("–", "-")
                 with t3_dl:
                     st.download_button("⬇", to_excel(t3_all_jobs,
-                                                      currency_cols=['Invoiced', 'Rental Income', 'Labor Income', 'Other Income',
+                                                      currency_cols=['Contract Amount', 'Invoiced', 'Rental Income', 'Labor Income', 'Other Income',
                                                                      'Total Cost', 'Labor Cost', 'Other Costs', 'Gross Profit'],
-                                                      pct_cols=['GP %', 'Labor Margin %']),
+                                                      pct_cols=['% Billed', 'GP %', 'Labor Margin %']),
                                        file_name=f"customer_jobs_{t3_safe_label}.xlsx",
                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                        key="dl_cust_jobs")
 
                 t3_height = min(55 + len(t3_all_jobs) * 44, 1400)
                 sortable_table(t3_all_jobs,
-                               currency_cols=['Invoiced', 'Rental Income', 'Labor Income', 'Other Income',
+                               currency_cols=['Contract Amount', 'Invoiced', 'Rental Income', 'Labor Income', 'Other Income',
                                               'Total Cost', 'Labor Cost', 'Other Costs', 'Gross Profit'],
-                               pct_cols=['GP %', 'Labor Margin %'],
+                               pct_cols=['% Billed', 'GP %', 'Labor Margin %'],
                                height=t3_height)
+
+                # ── Single-job detail: Labor Hours + Change Orders ──────────
+                if len(selected_job_labels) == 1:
+                    _single_job = selected_job_labels[0]
+
+                    # Fetch job detail data from DB
+                    _detail_session = SessionLocal()
+                    _jh = _detail_session.query(JobHours).filter(
+                        JobHours.job_number == _single_job).first()
+                    _jb = _detail_session.query(JobBudget).filter(
+                        JobBudget.job_number == _single_job).first()
+                    _cos = (_detail_session.query(JobChangeOrder)
+                            .filter(JobChangeOrder.job_number == _single_job)
+                            .order_by(JobChangeOrder.co_number)
+                            .all())
+                    _detail_session.close()
+
+                    if _jh or _jb or _cos:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown(f"#### Job Detail — {_single_job}")
+                        st.caption("Static data from the latest Labor Distribution & Job Cost Status uploads.")
+
+                    # ── Labor Hours ──────────────────────────────────────────
+                    if _jh:
+                        _pct_used = (_jh.hours_used / _jh.hours_budgeted * 100) if _jh.hours_budgeted else 0
+                        _hrs_variance = _jh.hours_budgeted - _jh.hours_used
+
+                        with st.container(border=True):
+                            _lh_hdr = ("font-size:1.25rem;font-weight:700;color:#004987;"
+                                       "border-bottom:2px solid #004987;padding-bottom:4px;"
+                                       "margin:0 0 12px 0;letter-spacing:0.5px;")
+                            st.markdown(f'<div style="{_lh_hdr}">LABOR HOURS</div>',
+                                        unsafe_allow_html=True)
+                            lh1, lh2, lh3, lh4 = st.columns(4)
+                            with lh1:
+                                st.markdown(f"""<div class="metric-card">
+                                    <div class="metric-label">Hours Budgeted</div>
+                                    <div class="metric-value">{_jh.hours_budgeted:,.0f}</div>
+                                </div>""", unsafe_allow_html=True)
+                            with lh2:
+                                st.markdown(f"""<div class="metric-card">
+                                    <div class="metric-label">Hours Used</div>
+                                    <div class="metric-value">{_jh.hours_used:,.0f}</div>
+                                </div>""", unsafe_allow_html=True)
+                            with lh3:
+                                _pct_color = "#27ae60" if _pct_used <= 100 else "#e74c3c"
+                                st.markdown(f"""<div class="metric-card">
+                                    <div class="metric-label">% Used</div>
+                                    <div class="metric-value" style="color:{_pct_color};">{_pct_used:.1f}%</div>
+                                </div>""", unsafe_allow_html=True)
+                            with lh4:
+                                _var_color = "#27ae60" if _hrs_variance >= 0 else "#e74c3c"
+                                st.markdown(f"""<div class="metric-card">
+                                    <div class="metric-label">Variance</div>
+                                    <div class="metric-value" style="color:{_var_color};">{_hrs_variance:,.0f}</div>
+                                </div>""", unsafe_allow_html=True)
+
+                    # ── Budget + Change Orders ───────────────────────────────
+                    if _jb or _cos:
+                        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+                        with st.container(border=True):
+                            _co_hdr = ("font-size:1.25rem;font-weight:700;color:#004987;"
+                                       "border-bottom:2px solid #004987;padding-bottom:4px;"
+                                       "margin:0 0 12px 0;letter-spacing:0.5px;")
+                            st.markdown(f'<div style="{_co_hdr}">BUDGET &amp; CHANGE ORDERS</div>',
+                                        unsafe_allow_html=True)
+
+                            if _cos:
+                                _co_data = []
+                                if _jb:
+                                    _co_data.append({
+                                        'Change Order': 'Original Budget',
+                                        'Description': '',
+                                        'Cost Budgeted': _jb.original_budget,
+                                    })
+                                for co in _cos:
+                                    _co_data.append({
+                                        'Change Order': co.co_number,
+                                        'Description': co.description or '',
+                                        'Cost Budgeted': co.amount,
+                                    })
+                                _co_df = pd.DataFrame(_co_data)
+                                _co_only_total = sum(co.amount for co in _cos)
+                                _revised_total = (_jb.original_budget if _jb else 0) + _co_only_total
+
+                                sortable_table(_co_df,
+                                               currency_cols=['Cost Budgeted'],
+                                               height=min(55 + len(_co_df) * 44, 600))
+                                st.markdown(f"""<div style="text-align:right;font-size:1.2rem;
+                                    font-weight:700;color:#2c3e50;margin-top:8px;padding:8px 14px;
+                                    background:#f0f4f8;border-radius:6px;">
+                                    Total Change Orders: ${_co_only_total:,.0f}
+                                    &nbsp;&nbsp;·&nbsp;&nbsp;
+                                    Revised Budget (Original + COs): ${_revised_total:,.0f}
+                                </div>""", unsafe_allow_html=True)

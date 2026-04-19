@@ -1,6 +1,103 @@
 import pandas as pd
-from database import SessionLocal, SalesRecord, UploadLog, BacklogSnapshot, BudgetRecord
+import os, io
+from database import (SessionLocal, SalesRecord, UploadLog, BacklogSnapshot, BudgetRecord,
+                       JobHours, JobChangeOrder, JobBudget, CustomerLookup)
 from datetime import datetime
+
+
+# ─── Upload archive (so every upload can be reprocessed later) ─────────────
+def _upload_root():
+    """Root folder for archived raw uploads. Sits next to the DB so Render's
+    persistent disk keeps both together."""
+    return os.path.join(os.environ.get('DB_DIR', 'data'), 'uploads')
+
+
+def _archive_upload(file_obj, subdir, out_name=None):
+    """Save a Streamlit UploadedFile / BytesIO to the upload archive, then rewind it."""
+    dest_dir = os.path.join(_upload_root(), subdir)
+    os.makedirs(dest_dir, exist_ok=True)
+    name = out_name or getattr(file_obj, 'name', 'file.xlsx')
+    dest = os.path.join(dest_dir, os.path.basename(name))
+    if hasattr(file_obj, 'seek'):
+        try: file_obj.seek(0)
+        except Exception: pass
+    data = file_obj.read()
+    with open(dest, 'wb') as out:
+        out.write(data)
+    if hasattr(file_obj, 'seek'):
+        try: file_obj.seek(0)
+        except Exception: pass
+
+
+def _wrap_as_upload(path):
+    """Wrap a file on disk as a BytesIO with .name, matching Streamlit UploadedFile shape."""
+    with open(path, 'rb') as f:
+        data = f.read()
+    buf = io.BytesIO(data)
+    buf.name = os.path.basename(path)
+    return buf
+
+
+def _job_prefix(job_number):
+    """Extract the client ID prefix from a job number (e.g., 'ADPE' from 'ADPE-P501')."""
+    return job_number.split('-')[0].strip().upper() if '-' in job_number else job_number.strip().upper()
+
+
+def _update_customer_lookup(session, jobs_data):
+    """Learn and apply customer names using the persistent prefix→customer lookup.
+
+    1. Mine ALL existing SalesRecords for known customer→prefix mappings (catches history).
+    2. Learn from the current upload's jobs_data.
+    3. Fill unknowns by prefix match.
+    """
+    # Step 0: Seed lookup from ALL existing SalesRecords (historical data)
+    from sqlalchemy import distinct
+    existing_customers = (
+        session.query(SalesRecord.job_number, SalesRecord.customer)
+        .filter(SalesRecord.customer != 'Unknown', SalesRecord.customer != '', SalesRecord.customer.isnot(None))
+        .all()
+    )
+    for job_num, cust in existing_customers:
+        prefix = _job_prefix(job_num)
+        existing_cl = session.query(CustomerLookup).filter(
+            CustomerLookup.job_prefix == prefix).first()
+        if not existing_cl:
+            session.add(CustomerLookup(
+                job_prefix=prefix, customer_name=cust,
+                last_updated=datetime.utcnow()))
+            session.flush()
+
+    # Step 1: Learn from current upload (overrides older values)
+    learned = {}
+    for job_id, d in jobs_data.items():
+        cust = d.get('customer', 'Unknown')
+        if cust and cust != 'Unknown':
+            learned[_job_prefix(job_id)] = cust
+
+    for prefix, cust in learned.items():
+        existing_cl = session.query(CustomerLookup).filter(
+            CustomerLookup.job_prefix == prefix).first()
+        if existing_cl:
+            existing_cl.customer_name = cust
+            existing_cl.last_updated = datetime.utcnow()
+        else:
+            session.add(CustomerLookup(
+                job_prefix=prefix, customer_name=cust,
+                last_updated=datetime.utcnow()))
+            session.flush()
+
+    # Step 2: Fill unknowns from lookup (DB + just-learned)
+    for job_id, d in jobs_data.items():
+        if not d.get('customer') or d['customer'] == 'Unknown':
+            prefix = _job_prefix(job_id)
+            if prefix in learned:
+                d['customer'] = learned[prefix]
+            else:
+                lookup = session.query(CustomerLookup).filter(
+                    CustomerLookup.job_prefix == prefix).first()
+                if lookup:
+                    d['customer'] = lookup.customer_name
+
 
 def identify_files(uploaded_files):
     files_map = {'job_summary': None, 'gl': None, 'sales_person': None, 'inventory_item': None, 'job_cost': None}
@@ -88,7 +185,11 @@ def process_sales_upload(uploaded_files, year: int, month: int):
     missing = [k for k, v in fmap.items() if v is None]
     if missing:
         return False, f"Missing recognized files for: {', '.join(missing)}"
-        
+
+    # Archive originals so we can reprocess later
+    for f in uploaded_files:
+        _archive_upload(f, f"sales/{year:04d}-{month:02d}")
+
     session = SessionLocal()
     try:
         # --- 1. General Ledger (Invoice -> Job mapping) ---
@@ -264,6 +365,9 @@ def process_sales_upload(uploaded_files, year: int, month: int):
                 jd['other_costs'] += cost_amt
 
         # --- SAVE TO DATABASE ---
+        # Learn + fill customer names via persistent prefix→customer lookup
+        _update_customer_lookup(session, jobs_data)
+
         # Fallback: use customer name as description when Job Summary had no entry
         for d in jobs_data.values():
             if not d['description'] or d['description'] == 'Unknown':
@@ -313,6 +417,10 @@ def process_annual_upload(uploaded_files, year: int):
     missing = [k for k, v in fmap.items() if v is None]
     if missing:
         return False, f"Missing recognized files for: {', '.join(missing)}"
+
+    # Archive originals so we can reprocess later
+    for f in uploaded_files:
+        _archive_upload(f, f"annual/{year:04d}")
 
     session = SessionLocal()
     try:
@@ -472,6 +580,9 @@ def process_annual_upload(uploaded_files, year: int):
                 else:
                     jd['other_costs'] += cost_amt
 
+            # Learn + fill customer names via persistent prefix→customer lookup
+            _update_customer_lookup(session, jobs_data)
+
             # Fallback: use customer name as description when Job Summary had no entry
             for d in jobs_data.values():
                 if not d['description'] or d['description'] == 'Unknown':
@@ -523,6 +634,9 @@ def process_budget_upload(file_obj, year: int):
     Salesperson names are stored uppercased so they match SalesRecord values.
     'Income' row is stored as salesperson='COMPANY' for use in All-Salespeople view.
     """
+    # Archive original so we can reprocess later
+    _archive_upload(file_obj, "budget", out_name=f"{year:04d}.xlsx")
+
     import openpyxl
     try:
         wb = openpyxl.load_workbook(file_obj, data_only=True)
@@ -588,3 +702,280 @@ def process_budget_upload(file_obj, year: int):
         return False, f"Error saving budget: {e}"
     finally:
         session.close()
+
+
+# ─── Reprocess every previously-uploaded period from the archive ─────────
+def reprocess_all_from_archive():
+    """Walk uploads/ and re-run each archived set through its processor.
+
+    Returns a list of (kind, period, ok, msg) tuples for reporting.
+    """
+    results = []
+    root = _upload_root()
+    if not os.path.isdir(root):
+        return results
+
+    # 1. Monthly sales uploads → uploads/sales/YYYY-MM/*.xlsx
+    sales_root = os.path.join(root, 'sales')
+    if os.path.isdir(sales_root):
+        for period in sorted(os.listdir(sales_root)):
+            m = re.match(r'^(\d{4})-(\d{1,2})$', period)
+            if not m:
+                continue
+            y, mo = int(m.group(1)), int(m.group(2))
+            pdir = os.path.join(sales_root, period)
+            files = [_wrap_as_upload(os.path.join(pdir, f))
+                     for f in sorted(os.listdir(pdir)) if f.lower().endswith('.xlsx')]
+            if len(files) < 5:
+                results.append(('sales', period, False, f"only {len(files)}/5 files archived"))
+                continue
+            ok, msg = process_sales_upload(files, y, mo)
+            results.append(('sales', period, ok, msg))
+
+    # 2. Annual bulk uploads → uploads/annual/YYYY/*.xlsx
+    annual_root = os.path.join(root, 'annual')
+    if os.path.isdir(annual_root):
+        for year_dir in sorted(os.listdir(annual_root)):
+            m = re.match(r'^(\d{4})$', year_dir)
+            if not m:
+                continue
+            y = int(m.group(1))
+            ydir = os.path.join(annual_root, year_dir)
+            files = [_wrap_as_upload(os.path.join(ydir, f))
+                     for f in sorted(os.listdir(ydir)) if f.lower().endswith('.xlsx')]
+            if len(files) < 5:
+                results.append(('annual', year_dir, False, f"only {len(files)}/5 files archived"))
+                continue
+            ok, msg = process_annual_upload(files, y)
+            results.append(('annual', year_dir, ok, msg))
+
+    # 3. Budget files → uploads/budget/YYYY.xlsx
+    budget_root = os.path.join(root, 'budget')
+    if os.path.isdir(budget_root):
+        for fname in sorted(os.listdir(budget_root)):
+            m = re.match(r'^(\d{4})\.xlsx$', fname, re.IGNORECASE)
+            if not m:
+                continue
+            y = int(m.group(1))
+            ok, msg = process_budget_upload(_wrap_as_upload(os.path.join(budget_root, fname)), y)
+            results.append(('budget', str(y), ok, msg))
+
+    return results
+
+
+def process_labor_distribution(file_obj):
+    """Parse a Labor Distribution file and upsert hours budgeted/used per job.
+
+    Extracts the 'Job Totals' row per job:
+      - Budget (col 4) → hours_budgeted
+      - Total Hours (col 8) → hours_used
+    Only updates jobs present in the file; others are untouched.
+    """
+    _archive_upload(file_obj, "labor_distribution", out_name="Labor Distribution.xlsx")
+
+    try:
+        df = pd.read_excel(file_obj, header=None)
+    except Exception as e:
+        return False, f"Could not read Labor Distribution file: {e}"
+
+    records = []
+    current_job = None
+
+    for i, row in df.iterrows():
+        c0 = str(row[0]).strip() if pd.notna(row[0]) else ''
+        c1 = str(row[1]).strip() if pd.notna(row[1]) else ''
+        c2 = str(row[2]).strip() if pd.notna(row[2]) else ''
+
+        if c1 == 'Job' and c2:
+            current_job = c2
+        elif c1 == 'Job Totals' and current_job:
+            budget = pd.to_numeric(row[4], errors='coerce') or 0.0
+            total_hours = pd.to_numeric(row[8], errors='coerce') or 0.0
+            records.append({
+                'job_number': current_job,
+                'hours_budgeted': budget,
+                'hours_used': total_hours,
+            })
+            current_job = None
+
+    if not records:
+        return False, "No job data found in Labor Distribution file."
+
+    session = SessionLocal()
+    try:
+        job_nums = [r['job_number'] for r in records]
+        session.query(JobHours).filter(JobHours.job_number.in_(job_nums)).delete(
+            synchronize_session=False)
+        session.add_all([
+            JobHours(job_number=r['job_number'],
+                     hours_budgeted=r['hours_budgeted'],
+                     hours_used=r['hours_used'],
+                     last_updated=datetime.utcnow())
+            for r in records
+        ])
+        log = UploadLog(upload_timestamp=datetime.utcnow(), data_type="Labor Distribution")
+        session.add(log)
+        session.commit()
+        return True, f"Labor Distribution loaded: {len(records)} jobs updated."
+    except Exception as e:
+        session.rollback()
+        return False, f"Error saving Labor Distribution: {e}"
+    finally:
+        session.close()
+
+
+def process_job_cost_status(file_obj):
+    """Parse a Job Cost Status file and upsert budget + change orders per job.
+
+    Per job extracts:
+      - 'Budget Totals' → Original Budget (col 3) → JobBudget
+      - Each 'Change Order NN' header → CO number, description
+      - 'Change Order Totals' → Original Budget (col 3) → JobChangeOrder
+    Only updates jobs present in the file; others are untouched.
+    """
+    _archive_upload(file_obj, "job_cost_status", out_name="Job Cost Status.xls")
+
+    try:
+        df = pd.read_excel(file_obj, header=None)
+    except Exception as e:
+        return False, f"Could not read Job Cost Status file: {e}"
+
+    budget_records = []
+    co_records = []
+    current_job = None
+    current_co = None
+    current_co_desc = None
+
+    for i, row in df.iterrows():
+        c0 = str(row[0]).strip() if pd.notna(row[0]) else ''
+        c1 = str(row[1]).strip() if pd.notna(row[1]) else ''
+        c2 = str(row[2]).strip() if pd.notna(row[2]) else ''
+
+        if c1 == 'Job' and c2:
+            current_job = c2
+            current_co = None
+
+        elif c1 == 'Budget Totals' and current_job:
+            orig_budget = pd.to_numeric(row[3], errors='coerce') or 0.0
+            budget_records.append({
+                'job_number': current_job,
+                'original_budget': orig_budget,
+            })
+
+        elif c0.startswith('Change Order') and current_job:
+            current_co = c0
+            current_co_desc = c1 if c1 else c0
+
+        elif c1 == 'Change Order Totals' and current_job and current_co:
+            co_amount = pd.to_numeric(row[3], errors='coerce') or 0.0
+            co_records.append({
+                'job_number': current_job,
+                'co_number': current_co,
+                'description': current_co_desc,
+                'amount': co_amount,
+            })
+            current_co = None
+            current_co_desc = None
+
+    if not budget_records and not co_records:
+        return False, "No job data found in Job Cost Status file."
+
+    session = SessionLocal()
+    try:
+        job_nums = list(set(
+            [r['job_number'] for r in budget_records] +
+            [r['job_number'] for r in co_records]
+        ))
+        session.query(JobBudget).filter(JobBudget.job_number.in_(job_nums)).delete(
+            synchronize_session=False)
+        session.query(JobChangeOrder).filter(JobChangeOrder.job_number.in_(job_nums)).delete(
+            synchronize_session=False)
+
+        session.add_all([
+            JobBudget(job_number=r['job_number'],
+                      original_budget=r['original_budget'],
+                      last_updated=datetime.utcnow())
+            for r in budget_records
+        ])
+        session.add_all([
+            JobChangeOrder(job_number=r['job_number'],
+                           co_number=r['co_number'],
+                           description=r['description'],
+                           amount=r['amount'],
+                           last_updated=datetime.utcnow())
+            for r in co_records
+        ])
+        log = UploadLog(upload_timestamp=datetime.utcnow(), data_type="Job Cost Status")
+        session.add(log)
+        session.commit()
+        return True, (f"Job Cost Status loaded: {len(budget_records)} job budgets, "
+                      f"{len(co_records)} change orders.")
+    except Exception as e:
+        session.rollback()
+        return False, f"Error saving Job Cost Status: {e}"
+    finally:
+        session.close()
+
+
+def archived_periods_summary():
+    """Return a human-readable summary of what's currently archived."""
+    root = _upload_root()
+    lines = []
+    for kind, sub in [('Monthly sales', 'sales'), ('Annual bulk', 'annual'), ('Budget', 'budget')]:
+        p = os.path.join(root, sub)
+        if not os.path.isdir(p):
+            continue
+        entries = sorted(os.listdir(p))
+        if entries:
+            lines.append(f"{kind}: {', '.join(entries)}")
+    return lines
+
+
+def get_file_library():
+    """Walk the upload archive and return a list of dicts describing every stored file.
+
+    Each dict: {'type', 'period', 'filename', 'path', 'size_kb', 'uploaded_at'}
+    Sorted by type → period → filename.
+    """
+    root = _upload_root()
+    files = []
+    if not os.path.isdir(root):
+        return files
+    for kind in ['sales', 'annual', 'budget']:
+        kind_root = os.path.join(root, kind)
+        if not os.path.isdir(kind_root):
+            continue
+        if kind == 'budget':
+            for fname in sorted(os.listdir(kind_root)):
+                if not fname.lower().endswith('.xlsx'):
+                    continue
+                fpath = os.path.join(kind_root, fname)
+                stat = os.stat(fpath)
+                files.append({
+                    'type': 'Budget',
+                    'period': os.path.splitext(fname)[0],
+                    'filename': fname,
+                    'path': fpath,
+                    'size_kb': round(stat.st_size / 1024, 1),
+                    'uploaded_at': datetime.fromtimestamp(stat.st_mtime),
+                })
+        else:
+            for period_dir in sorted(os.listdir(kind_root)):
+                pdir = os.path.join(kind_root, period_dir)
+                if not os.path.isdir(pdir):
+                    continue
+                label = 'Monthly' if kind == 'sales' else 'Annual'
+                for fname in sorted(os.listdir(pdir)):
+                    if not fname.lower().endswith('.xlsx'):
+                        continue
+                    fpath = os.path.join(pdir, fname)
+                    stat = os.stat(fpath)
+                    files.append({
+                        'type': label,
+                        'period': period_dir,
+                        'filename': fname,
+                        'path': fpath,
+                        'size_kb': round(stat.st_size / 1024, 1),
+                        'uploaded_at': datetime.fromtimestamp(stat.st_mtime),
+                    })
+    return files

@@ -51,6 +51,37 @@ class BacklogSnapshot(Base):
     hard_backlog = Column(Float, default=0.0)
     is_open = Column(Boolean, default=True)
 
+class JobHours(Base):
+    __tablename__ = 'job_hours'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_number = Column(String, nullable=False, unique=True)
+    hours_budgeted = Column(Float, default=0.0)
+    hours_used = Column(Float, default=0.0)
+    last_updated = Column(Date, default=datetime.utcnow)
+
+class JobChangeOrder(Base):
+    __tablename__ = 'job_change_orders'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_number = Column(String, nullable=False)
+    co_number = Column(String, nullable=False)
+    description = Column(String)
+    amount = Column(Float, default=0.0)
+    last_updated = Column(Date, default=datetime.utcnow)
+
+class JobBudget(Base):
+    __tablename__ = 'job_budget'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_number = Column(String, nullable=False, unique=True)
+    original_budget = Column(Float, default=0.0)
+    last_updated = Column(Date, default=datetime.utcnow)
+
+class CustomerLookup(Base):
+    __tablename__ = 'customer_lookup'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_prefix = Column(String, nullable=False, unique=True)
+    customer_name = Column(String, nullable=False)
+    last_updated = Column(Date, default=datetime.utcnow)
+
 class UploadLog(Base):
     __tablename__ = 'upload_logs'
     id = Column(Integer, primary_key=True, autoincrement=True)

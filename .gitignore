@@ -3,3 +3,13 @@
 __pycache__/
 venv/
 *.pyc
+data/
+*.XLS
+~$*
+General Ledger*.xlsx
+Job Summary*.xlsx
+Job Cost Query*.xlsx
+Job Cost Status*
+Sales Analysis*.xlsx
+*budget*.xlsx
+Labor Distribution*
